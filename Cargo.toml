@@ -1,0 +1,32 @@
+[package]
+name = "epub-tts"
+version = "0.1.0"
+edition = "2024"
+description = "CLI EPUB reader that narrates books with any-tts"
+license = "MIT"
+readme = "README.md"
+keywords = ["epub", "tts", "audiobook", "cli", "speech"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+anyhow = "1"
+any-tts = { version = "0.1.2", default-features = false, features = ["kokoro", "download"] }
+clap = { version = "4", features = ["derive"] }
+epub = "2.1"
+html2text = "0.14"
+regex = "1"
+rodio = { version = "0.20", default-features = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["metal"]
+# Apple GPU acceleration (recommended on macOS)
+metal = ["any-tts/metal"]
+# NVIDIA GPU acceleration
+cuda = ["any-tts/cuda"]
+# Extra any-tts backends (large downloads / heavier compile)
+omnivoice = ["any-tts/omnivoice"]
+qwen3-tts = ["any-tts/qwen3-tts"]
+vibevoice = ["any-tts/vibevoice"]
+voxtral = ["any-tts/voxtral"]
