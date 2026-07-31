@@ -17,6 +17,7 @@ html2text = "0.14"
 indicatif = "0.17"
 regex = "1"
 rodio = { version = "0.20", default-features = true }
+shine-rs = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

@@ -2,12 +2,14 @@
 
 mod audio_fx;
 mod book;
+mod export;
 mod play;
 mod text;
 mod tts_engine;
 
 use crate::audio_fx::change_speed;
 use crate::book::Book;
+use crate::export::{chapter_output_path, save_audio};
 use crate::text::chunk_for_tts;
 use crate::tts_engine::{Backend, DeviceKind, Engine, TtsOptions};
 use anyhow::{Context, Result, bail};
@@ -74,7 +76,7 @@ enum Commands {
         #[arg(long)]
         to: Option<usize>,
 
-        /// Write WAV output to this path (directory for multi-chapter)
+        /// Write audio to this path (.wav or .mp3; directory for multi-chapter)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -98,7 +100,7 @@ enum Commands {
         #[arg(long)]
         language: Option<String>,
 
-        /// Named speaker (Qwen3 CustomVoice: Ryan, Vivian, …)
+        /// Named speaker (Qwen3 CustomVoice; default Vivian)
         #[arg(long)]
         voice: Option<String>,
 
@@ -107,7 +109,7 @@ enum Commands {
         instruct: Option<String>,
 
         /// Max characters per internal TTS piece (long chapters are split under the hood)
-        #[arg(long, default_value_t = 400)]
+        #[arg(long, default_value_t = 800)]
         chunk_chars: usize,
 
         /// Playback/synthesis speed multiplier (1.0 = normal, 1.5 = 50% faster)
@@ -357,20 +359,8 @@ fn cmd_read(args: ReadArgs) -> Result<()> {
         }
 
         if let Some(out_path) = &args.output {
-            let path = if multi || out_path.is_dir() {
-                std::fs::create_dir_all(out_path)
-                    .with_context(|| format!("create output dir {}", out_path.display()))?;
-                out_path.join(format!("{:04}.wav", idx))
-            } else {
-                if let Some(parent) = out_path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                }
-                out_path.clone()
-            };
-            audio
-                .save_wav(&path)
+            let path = chapter_output_path(out_path, idx, multi)?;
+            save_audio(&audio, &path)
                 .with_context(|| format!("write {}", path.display()))?;
             // One quiet confirmation line after the progress bar clears.
             eprintln!("wrote {}", path.display());

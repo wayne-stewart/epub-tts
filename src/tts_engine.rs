@@ -249,16 +249,16 @@ fn truncate(s: &str, max: usize) -> String {
 /// Pick a CustomVoice speaker when the user did not pass --voice.
 fn default_qwen3_voice(voices: &[String], language: Option<&str>) -> Option<String> {
     if voices.is_empty() {
-        // Common default on the public CustomVoice checkpoint when voice list is empty at load.
-        return Some("Ryan".into());
+        // Preferred default on the public CustomVoice checkpoint.
+        return Some("Vivian".into());
     }
 
     let preferred = match language {
-        Some("English") | None => &["Ryan", "Aiden", "Vivian", "Serena"][..],
+        Some("English") | None => &["Vivian", "Ryan", "Aiden", "Serena"][..],
         Some("Chinese") => &["Vivian", "Serena", "Uncle_Fu", "Dylan"][..],
         Some("Japanese") => &["Ono_Anna", "Sohee"][..],
         Some("Korean") => &["Sohee", "Ono_Anna"][..],
-        _ => &["Ryan", "Vivian", "Aiden"][..],
+        _ => &["Vivian", "Ryan", "Aiden"][..],
     };
 
     for name in preferred {

@@ -47,11 +47,12 @@ epub-tts read book.epub -c 1
 # Pick a speaker and language explicitly
 epub-tts read book.epub -c 1 \
   --language English \
-  --voice Ryan \
+  --voice Vivian \
   --device metal
 
-# Also save a continuous WAV of the chapter
+# Save as WAV or MP3 (format follows the file extension)
 epub-tts read book.epub -c 1 -o chapter1.wav
+epub-tts read book.epub -c 1 -o chapter1.mp3 --no-play
 
 # Fast/local Kokoro (if built with --features kokoro)
 epub-tts read book.epub -c 1 --backend kokoro
@@ -63,15 +64,15 @@ epub-tts read book.epub -c 1 --backend kokoro
 |------|-------------|
 | `-c, --chapter N` | Spine index (default `0`) |
 | `--to N` | Inclusive end chapter for a range |
-| `-o, --output PATH` | Optional WAV file (or directory for multi-chapter) |
+| `-o, --output PATH` | Optional `.wav` / `.mp3` file (or directory for multi-chapter) |
 | `--no-play` | Print + synthesize only; do not open speakers |
 | `--backend` | `qwen3` (default), `kokoro`, `omnivoice`, `vibevoice`, … |
 | `--model-path` | Local model directory (skips HF download when complete) |
 | `--device` | `auto`, `cpu`, `metal`, `cuda` |
 | `--language` | e.g. `en` / `English` (falls back to EPUB metadata) |
-| `--voice` | Named speaker (Qwen3: `Ryan`, `Vivian`, …) |
+| `--voice` | Named speaker (Qwen3 default: `Vivian`) |
 | `--instruct` | Style instruction (default audiobook-style for Qwen3) |
-| `--chunk-chars` | Max characters per synthesis piece (default `400`) |
+| `--chunk-chars` | Max characters per synthesis piece (default `800`) |
 | `--speed` | Playback speed multiplier (default `1.0`) |
 
 By default, `read` synthesizes the entire chapter (with a progress bar), then plays it.
