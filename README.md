@@ -47,7 +47,7 @@ epub-tts read book.epub -c 1
 # Pick a speaker and language explicitly
 epub-tts read book.epub -c 1 \
   --language English \
-  --voice Vivian \
+  --voice vivian \
   --device metal
 
 # Save as WAV or MP3 (format follows the file extension)
@@ -70,7 +70,7 @@ epub-tts read book.epub -c 1 --backend kokoro
 | `--model-path` | Local model directory (skips HF download when complete) |
 | `--device` | `auto`, `cpu`, `metal`, `cuda` |
 | `--language` | e.g. `en` / `English` (falls back to EPUB metadata) |
-| `--voice` | Named speaker (Qwen3 default: `Vivian`) |
+| `--voice` | Named speaker (Qwen3 default: `vivian`) |
 | `--instruct` | Style instruction (default audiobook-style for Qwen3) |
 | `--chunk-chars` | Max characters per synthesis piece (default `800`) |
 | `--speed` | Playback speed multiplier (default `1.0`) |

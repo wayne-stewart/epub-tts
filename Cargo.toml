@@ -14,7 +14,6 @@ any-tts = { version = "0.1.2", default-features = false, features = ["download"]
 clap = { version = "4", features = ["derive"] }
 epub = "2.1"
 html2text = "0.14"
-indicatif = "0.17"
 regex = "1"
 rodio = { version = "0.20", default-features = true }
 shine-rs = "0.1"

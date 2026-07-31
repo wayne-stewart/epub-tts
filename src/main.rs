@@ -7,7 +7,7 @@ mod play;
 mod text;
 mod tts_engine;
 
-use crate::audio_fx::change_speed;
+use crate::audio_fx::{change_speed, join_chunks};
 use crate::book::Book;
 use crate::export::{chapter_output_path, save_audio};
 use crate::text::chunk_for_tts;
@@ -15,9 +15,9 @@ use crate::tts_engine::{Backend, DeviceKind, Engine, TtsOptions};
 use anyhow::{Context, Result, bail};
 use any_tts::AudioSamples;
 use clap::{Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -100,7 +100,7 @@ enum Commands {
         #[arg(long)]
         language: Option<String>,
 
-        /// Named speaker (Qwen3 CustomVoice; default Vivian)
+        /// Named speaker (Qwen3 CustomVoice; default vivian)
         #[arg(long)]
         voice: Option<String>,
 
@@ -306,7 +306,7 @@ fn cmd_read(args: ReadArgs) -> Result<()> {
     // Clear reading style helps Qwen3 pronunciation/pacing for long-form text.
     let instruct = args.instruct.or_else(|| {
         if args.backend == Backend::Qwen3Tts {
-            Some("Clear, natural audiobook narration with accurate pronunciation.".into())
+            Some("clear, even toned ebook narration, natural reading pace.".into())
         } else {
             None
         }
@@ -374,7 +374,7 @@ fn cmd_read(args: ReadArgs) -> Result<()> {
     Ok(())
 }
 
-/// Synthesize every piece of a chapter, showing a progress bar until complete.
+/// Synthesize every piece of a chapter, showing an in-place progress line.
 fn synthesize_chapter_with_progress(
     engine: &Engine,
     pieces: &[String],
@@ -384,48 +384,85 @@ fn synthesize_chapter_with_progress(
         bail!("no text to synthesize");
     }
 
-    let bar = ProgressBar::new(pieces.len() as u64);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}",
-        )
-        .expect("valid progress template")
-        .progress_chars("=>-"),
-    );
-    bar.set_message(label.to_string());
-    bar.enable_steady_tick(Duration::from_millis(100));
+    let total = pieces.len();
+    let progress = LineProgress::new(total, label);
+    progress.draw(0);
 
     let mut combined: Option<AudioSamples> = None;
-    for piece in pieces {
-        let audio = engine.synthesize_chunk(piece).map_err(|err| {
-            bar.abandon_with_message("failed");
-            err
-        })?;
+    for (i, piece) in pieces.iter().enumerate() {
+        // Silence any-tts/candle `info!` spam so it cannot break the single-line bar.
+        let audio = tracing::subscriber::with_default(
+            tracing::subscriber::NoSubscriber::default(),
+            || engine.synthesize_chunk(piece),
+        )
+        .with_context(|| format!("synthesize piece {}/{total}", i + 1))?;
+
         combined = Some(match combined {
             None => audio,
-            Some(prev) => concat_audio(prev, audio)?,
+            Some(prev) => join_chunks(prev, audio)?,
         });
-        bar.inc(1);
+        progress.draw(i + 1);
     }
 
-    bar.finish_and_clear();
+    progress.finish();
     combined.context("synthesis produced no audio")
 }
 
-fn concat_audio(mut a: AudioSamples, b: AudioSamples) -> Result<AudioSamples> {
-    if a.sample_rate != b.sample_rate {
-        bail!(
-            "sample rate mismatch when concatenating audio: {} vs {}",
-            a.sample_rate,
-            b.sample_rate
-        );
+/// Single-line terminal progress updated with `\r` (no scrolling).
+struct LineProgress {
+    total: usize,
+    label: String,
+    is_tty: bool,
+    start: Instant,
+}
+
+impl LineProgress {
+    fn new(total: usize, label: &str) -> Self {
+        Self {
+            total: total.max(1),
+            label: truncate_msg(label, 36),
+            is_tty: io::stderr().is_terminal(),
+            start: Instant::now(),
+        }
     }
-    // Brief pause between internal pieces so joins sound natural.
-    let silence_samples = (a.sample_rate as f32 * 0.15) as usize;
-    a.samples
-        .extend(std::iter::repeat_n(0.0f32, silence_samples));
-    a.samples.extend(b.samples);
-    Ok(a)
+
+    fn draw(&self, done: usize) {
+        let done = done.min(self.total);
+        let pct = (done * 100) / self.total;
+        let width = 28usize;
+        let filled = (done * width) / self.total;
+        let bar: String = std::iter::repeat_n('=', filled)
+            .chain(std::iter::repeat_n('-', width.saturating_sub(filled)))
+            .collect();
+        let elapsed = self.start.elapsed();
+        let elapsed_s = format!(
+            "{:02}:{:02}",
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60
+        );
+
+        if self.is_tty {
+            // \r return to start of line; \x1b[2K clear entire line.
+            eprint!(
+                "\r\x1b[2K[{elapsed_s}] [{bar}] {done}/{} ({pct}%) {}",
+                self.total, self.label
+            );
+            let _ = io::stderr().flush();
+        } else if done == 0 || done == self.total || done % 5 == 0 {
+            // Non-TTY (piped logs): sparse updates only.
+            eprintln!(
+                "[{elapsed_s}] {done}/{} ({pct}%) {}",
+                self.total, self.label
+            );
+        }
+    }
+
+    fn finish(&self) {
+        if self.is_tty {
+            eprint!("\r\x1b[2K");
+            let _ = io::stderr().flush();
+        }
+    }
 }
 
 fn truncate_msg(s: &str, max: usize) -> String {

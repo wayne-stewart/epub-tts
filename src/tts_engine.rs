@@ -248,24 +248,27 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Pick a CustomVoice speaker when the user did not pass --voice.
 fn default_qwen3_voice(voices: &[String], language: Option<&str>) -> Option<String> {
+    // Qwen3 CustomVoice expects this exact casing for the default speaker.
+    const DEFAULT: &str = "vivian";
+
     if voices.is_empty() {
-        // Preferred default on the public CustomVoice checkpoint.
-        return Some("Vivian".into());
+        return Some(DEFAULT.into());
     }
 
     let preferred = match language {
-        Some("English") | None => &["Vivian", "Ryan", "Aiden", "Serena"][..],
-        Some("Chinese") => &["Vivian", "Serena", "Uncle_Fu", "Dylan"][..],
+        Some("English") | None => &[DEFAULT, "ryan", "aiden", "serena"][..],
+        Some("Chinese") => &[DEFAULT, "serena", "Uncle_Fu", "Dylan"][..],
         Some("Japanese") => &["Ono_Anna", "Sohee"][..],
         Some("Korean") => &["Sohee", "Ono_Anna"][..],
-        _ => &["Vivian", "Ryan", "Aiden"][..],
+        _ => &[DEFAULT, "ryan", "aiden"][..],
     };
 
     for name in preferred {
         if voices.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            // Always send the preferred spelling (e.g. "vivian", not "Vivian").
             return Some((*name).to_string());
         }
     }
 
-    voices.first().cloned()
+    Some(DEFAULT.into())
 }
