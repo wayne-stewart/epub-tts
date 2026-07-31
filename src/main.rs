@@ -1,23 +1,28 @@
 //! epub-tts — narrate EPUB books from the command line with any-tts.
 
+mod audio_fx;
 mod book;
 mod play;
 mod text;
 mod tts_engine;
 
+use crate::audio_fx::change_speed;
 use crate::book::Book;
 use crate::text::chunk_for_tts;
 use crate::tts_engine::{Backend, DeviceKind, Engine, TtsOptions};
 use anyhow::{Context, Result, bail};
+use any_tts::AudioSamples;
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "epub-tts",
     version,
     about = "CLI EPUB reader powered by any-tts",
-    long_about = "Open an EPUB, list chapters, extract text, and synthesize speech with local any-tts models (Kokoro by default)."
+    long_about = "Open an EPUB, list chapters, extract text, and synthesize speech with local any-tts models (Qwen3-TTS by default for best quality)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -73,12 +78,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Play audio through the default output device
-        #[arg(short, long)]
-        play: bool,
+        /// Skip playback (useful with --output only)
+        #[arg(long)]
+        no_play: bool,
 
-        /// TTS backend / model family
-        #[arg(long, default_value = "kokoro", value_parser = parse_backend)]
+        /// TTS backend / model family (qwen3 = best quality default)
+        #[arg(long, default_value = "qwen3", value_parser = parse_backend)]
         backend: Backend,
 
         /// Local model directory (skips Hugging Face download when complete)
@@ -89,21 +94,25 @@ enum Commands {
         #[arg(long, default_value = "auto", value_parser = parse_device)]
         device: DeviceKind,
 
-        /// Language tag (e.g. en, de, ja). Model-dependent.
+        /// Language (e.g. en / English, de / German). Defaults from EPUB metadata.
         #[arg(long)]
         language: Option<String>,
 
-        /// Named / preset voice (model-dependent; Kokoro uses voices/*.pt names)
+        /// Named speaker (Qwen3 CustomVoice: Ryan, Vivian, …)
         #[arg(long)]
         voice: Option<String>,
 
-        /// Style instruction (OmniVoice / Qwen3 instruct mode)
+        /// Style instruction for Qwen3 / OmniVoice (e.g. "Clear, natural audiobook narration.")
         #[arg(long)]
         instruct: Option<String>,
 
-        /// Max characters per TTS chunk
+        /// Max characters per internal TTS piece (long chapters are split under the hood)
         #[arg(long, default_value_t = 400)]
         chunk_chars: usize,
+
+        /// Playback/synthesis speed multiplier (1.0 = normal, 1.5 = 50% faster)
+        #[arg(long, default_value_t = 1.0)]
+        speed: f32,
     },
 }
 
@@ -135,7 +144,7 @@ fn run() -> Result<()> {
             chapter,
             to,
             output,
-            play,
+            no_play,
             backend,
             model_path,
             device,
@@ -143,12 +152,13 @@ fn run() -> Result<()> {
             voice,
             instruct,
             chunk_chars,
+            speed,
         } => cmd_read(ReadArgs {
             epub,
             chapter,
             to,
             output,
-            play,
+            play: !no_play,
             backend,
             model_path,
             device,
@@ -156,14 +166,18 @@ fn run() -> Result<()> {
             voice,
             instruct,
             chunk_chars,
+            speed,
         }),
     }
 }
 
 fn init_tracing(verbose: u8) {
+    // Quiet by default so synthesis only shows the progress bar.
+    // Use -v / -vv (or RUST_LOG=…) for diagnostics.
     let level = match verbose {
-        0 => "info",
-        1 => "debug",
+        0 => "error",
+        1 => "info",
+        2 => "debug",
         _ => "trace",
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -172,6 +186,7 @@ fn init_tracing(verbose: u8) {
         .with_env_filter(filter)
         .with_target(false)
         .without_time()
+        .with_writer(std::io::stderr)
         .init();
 }
 
@@ -265,11 +280,15 @@ struct ReadArgs {
     voice: Option<String>,
     instruct: Option<String>,
     chunk_chars: usize,
+    speed: f32,
 }
 
 fn cmd_read(args: ReadArgs) -> Result<()> {
     if !args.play && args.output.is_none() {
-        bail!("specify --output <path.wav> and/or --play");
+        bail!("nothing to do: enable playback (default) or pass --output");
+    }
+    if !args.speed.is_finite() || args.speed <= 0.0 {
+        bail!("--speed must be a positive number (got {})", args.speed);
     }
 
     let mut book = Book::open(&args.epub)?;
@@ -277,14 +296,18 @@ fn cmd_read(args: ReadArgs) -> Result<()> {
     let (start, end) = chapter_range(args.chapter, args.to, meta.chapter_count)?;
 
     // Default language from EPUB metadata when not provided.
-    let language = args.language.or_else(|| {
-        meta.language.as_ref().map(|l| {
-            // Prefer short ISO-ish tag for backends like Kokoro.
-            l.split(['-', '_'])
-                .next()
-                .unwrap_or(l)
-                .to_ascii_lowercase()
-        })
+    let language = args
+        .language
+        .or_else(|| meta.language.clone())
+        .or_else(|| Some("en".into()));
+
+    // Clear reading style helps Qwen3 pronunciation/pacing for long-form text.
+    let instruct = args.instruct.or_else(|| {
+        if args.backend == Backend::Qwen3Tts {
+            Some("Clear, natural audiobook narration with accurate pronunciation.".into())
+        } else {
+            None
+        }
     });
 
     let engine = Engine::load(&TtsOptions {
@@ -293,61 +316,134 @@ fn cmd_read(args: ReadArgs) -> Result<()> {
         device: args.device,
         language,
         voice: args.voice,
-        instruct: args.instruct,
+        instruct,
     })?;
 
+    let player = if args.play {
+        Some(play::Player::new()?)
+    } else {
+        None
+    };
+
     let multi = start != end;
+    let chapters = book.chapters();
+
     for idx in start..=end {
-        let title = book
-            .chapters()
-            .into_iter()
+        let title = chapters
+            .iter()
             .find(|c| c.index == idx)
-            .and_then(|c| c.title)
+            .and_then(|c| c.title.clone())
             .unwrap_or_else(|| format!("chapter-{idx}"));
 
-        tracing::info!(chapter = idx, %title, "reading chapter");
+        tracing::debug!(chapter = idx, %title, "synthesizing full chapter");
+
         let text = book.chapter_text(idx)?;
         if text.trim().is_empty() {
-            tracing::warn!(chapter = idx, "skipping empty chapter");
+            tracing::debug!(chapter = idx, "skipping empty chapter");
             continue;
         }
 
-        let chunks = chunk_for_tts(&text, args.chunk_chars);
-        tracing::info!(chapter = idx, chunks = chunks.len(), "chunked text");
+        let pieces = chunk_for_tts(&text, args.chunk_chars);
+        let label = format!("ch{idx} {}", truncate_msg(&title, 36));
+        let mut audio = synthesize_chapter_with_progress(&engine, &pieces, &label)?;
 
-        let audio = engine.synthesize_chunks(&chunks)?;
-        tracing::info!(
-            chapter = idx,
-            duration_s = format!("{:.1}", audio.duration_secs()),
-            "synthesis complete"
-        );
+        if (args.speed - 1.0).abs() >= 1e-3 {
+            audio = change_speed(&audio, args.speed);
+            tracing::debug!(
+                speed = args.speed,
+                duration_s = audio.duration_secs(),
+                "applied speed"
+            );
+        }
 
-        if let Some(out) = &args.output {
-            let path = if multi || out.is_dir() {
-                std::fs::create_dir_all(out)
-                    .with_context(|| format!("create output dir {}", out.display()))?;
-                out.join(format!("{:04}.wav", idx))
+        if let Some(out_path) = &args.output {
+            let path = if multi || out_path.is_dir() {
+                std::fs::create_dir_all(out_path)
+                    .with_context(|| format!("create output dir {}", out_path.display()))?;
+                out_path.join(format!("{:04}.wav", idx))
             } else {
-                if let Some(parent) = out.parent() {
+                if let Some(parent) = out_path.parent() {
                     if !parent.as_os_str().is_empty() {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                out.clone()
+                out_path.clone()
             };
             audio
                 .save_wav(&path)
                 .with_context(|| format!("write {}", path.display()))?;
-            println!("wrote {}", path.display());
+            // One quiet confirmation line after the progress bar clears.
+            eprintln!("wrote {}", path.display());
         }
 
-        if args.play {
-            println!("playing chapter {idx}…");
-            play::play_blocking(&audio)?;
+        if let Some(player) = &player {
+            player.play_blocking(&audio)?;
         }
     }
 
     Ok(())
+}
+
+/// Synthesize every piece of a chapter, showing a progress bar until complete.
+fn synthesize_chapter_with_progress(
+    engine: &Engine,
+    pieces: &[String],
+    label: &str,
+) -> Result<AudioSamples> {
+    if pieces.is_empty() {
+        bail!("no text to synthesize");
+    }
+
+    let bar = ProgressBar::new(pieces.len() as u64);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}",
+        )
+        .expect("valid progress template")
+        .progress_chars("=>-"),
+    );
+    bar.set_message(label.to_string());
+    bar.enable_steady_tick(Duration::from_millis(100));
+
+    let mut combined: Option<AudioSamples> = None;
+    for piece in pieces {
+        let audio = engine.synthesize_chunk(piece).map_err(|err| {
+            bar.abandon_with_message("failed");
+            err
+        })?;
+        combined = Some(match combined {
+            None => audio,
+            Some(prev) => concat_audio(prev, audio)?,
+        });
+        bar.inc(1);
+    }
+
+    bar.finish_and_clear();
+    combined.context("synthesis produced no audio")
+}
+
+fn concat_audio(mut a: AudioSamples, b: AudioSamples) -> Result<AudioSamples> {
+    if a.sample_rate != b.sample_rate {
+        bail!(
+            "sample rate mismatch when concatenating audio: {} vs {}",
+            a.sample_rate,
+            b.sample_rate
+        );
+    }
+    // Brief pause between internal pieces so joins sound natural.
+    let silence_samples = (a.sample_rate as f32 * 0.15) as usize;
+    a.samples
+        .extend(std::iter::repeat_n(0.0f32, silence_samples));
+    a.samples.extend(b.samples);
+    Ok(a)
+}
+
+fn truncate_msg(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
 }
 
 fn chapter_range(start: usize, to: Option<usize>, total: usize) -> Result<(usize, usize)> {

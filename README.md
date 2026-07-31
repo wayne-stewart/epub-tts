@@ -7,25 +7,27 @@ CLI EPUB reader that narrates books with [any-tts](https://crates.io/crates/any-
 - Open EPUB 2/3 files and inspect metadata
 - List spine chapters (reading order) with TOC titles when available
 - Dump plain text from chapters (HTML stripped)
-- Synthesize speech with **Kokoro-82M** by default (small, fast, Apache-2.0)
-- Optional backends: OmniVoice, Qwen3-TTS, VibeVoice, Voxtral
+- Synthesize speech with **Qwen3-TTS** by default (best quality / pronunciation)
+- Optional backends: Kokoro (fast/small), OmniVoice, VibeVoice, Voxtral
 - Write WAV files and/or play through the system audio device
-- Chunks long chapters at paragraph/sentence boundaries for stable TTS
+- Full-chapter synthesis with a progress bar, then play / save
 
 ## Install / build
 
 ```bash
-# macOS (Metal GPU) — default features
+# macOS (Metal GPU + Qwen3) — default features
 cargo build --release
 
-# CPU only
-cargo build --release --no-default-features
+# CPU only (still Qwen3; slower)
+cargo build --release --no-default-features --features qwen3-tts
 
-# Extra model families (larger compile + downloads)
-cargo build --release --features qwen3-tts,omnivoice,vibevoice
+# Lightweight Kokoro instead of / in addition to Qwen3
+cargo build --release --features kokoro
 ```
 
 Binary: `target/release/epub-tts`
+
+**Note:** Qwen3-TTS is a ~1.7B model plus speech-tokenizer weights. First run downloads several GB from Hugging Face. Prefer Metal/CUDA when available.
 
 ## Usage
 
@@ -38,23 +40,21 @@ epub-tts chapters book.epub
 
 # Plain text dump
 epub-tts text book.epub -c 3
-epub-tts text book.epub -c 0 --to 2
 
-# Narrate a chapter → WAV
+# Synthesize a full chapter (progress bar), then play
+epub-tts read book.epub -c 1
+
+# Pick a speaker and language explicitly
+epub-tts read book.epub -c 1 \
+  --language English \
+  --voice Ryan \
+  --device metal
+
+# Also save a continuous WAV of the chapter
 epub-tts read book.epub -c 1 -o chapter1.wav
 
-# Play while synthesizing (and optionally save)
-epub-tts read book.epub -c 1 --play -o chapter1.wav
-
-# Range of chapters into a directory
-epub-tts read book.epub -c 0 --to 4 -o ./audio/
-
-# Voice / language / model path
-epub-tts read book.epub -c 1 -o out.wav \
-  --language en \
-  --voice af_heart \
-  --model-path ./models/Kokoro-82M \
-  --device metal
+# Fast/local Kokoro (if built with --features kokoro)
+epub-tts read book.epub -c 1 --backend kokoro
 ```
 
 ### `read` options
@@ -63,29 +63,28 @@ epub-tts read book.epub -c 1 -o out.wav \
 |------|-------------|
 | `-c, --chapter N` | Spine index (default `0`) |
 | `--to N` | Inclusive end chapter for a range |
-| `-o, --output PATH` | WAV file, or directory when synthesizing multiple chapters |
-| `-p, --play` | Play through the default audio device |
-| `--backend` | `kokoro` (default), `omnivoice`, `qwen3`, `vibevoice`, … |
+| `-o, --output PATH` | Optional WAV file (or directory for multi-chapter) |
+| `--no-play` | Print + synthesize only; do not open speakers |
+| `--backend` | `qwen3` (default), `kokoro`, `omnivoice`, `vibevoice`, … |
 | `--model-path` | Local model directory (skips HF download when complete) |
 | `--device` | `auto`, `cpu`, `metal`, `cuda` |
-| `--language` | e.g. `en`, `de`, `ja` (falls back to EPUB metadata) |
-| `--voice` | Named/preset voice (model-dependent) |
-| `--instruct` | Style instruction (OmniVoice / Qwen3) |
-| `--chunk-chars` | Max characters per synthesis chunk (default `400`) |
+| `--language` | e.g. `en` / `English` (falls back to EPUB metadata) |
+| `--voice` | Named speaker (Qwen3: `Ryan`, `Vivian`, …) |
+| `--instruct` | Style instruction (default audiobook-style for Qwen3) |
+| `--chunk-chars` | Max characters per synthesis piece (default `400`) |
+| `--speed` | Playback speed multiplier (default `1.0`) |
 
-At least one of `--output` or `--play` is required for `read`.
+By default, `read` synthesizes the entire chapter (with a progress bar), then plays it.
 
 ## Models
 
-First run of a backend downloads weights from Hugging Face (needs network). Kokoro is the lightest default:
-
-| Backend | Cargo feature | Notes |
-|---------|---------------|--------|
-| Kokoro | always on | Best default for local CLI use |
-| OmniVoice | `omnivoice` | Multilingual + instruct |
-| Qwen3-TTS | `qwen3-tts` | Strong control / named speakers |
-| VibeVoice | `vibevoice` | Long-form / reference audio |
-| Voxtral | `voxtral` | Larger; **CC BY-NC** weights |
+| Backend | Cargo feature | Default? | Notes |
+|---------|---------------|----------|--------|
+| **Qwen3-TTS** | `qwen3-tts` | **yes** | Best quality / pronunciation; named speakers |
+| Kokoro | `kokoro` | no | Small & fast; weaker English pronunciation |
+| OmniVoice | `omnivoice` | no | Multilingual + instruct / voice design |
+| VibeVoice | `vibevoice` | no | Long-form / reference audio |
+| Voxtral | `voxtral` | no | Larger; **CC BY-NC** weights |
 
 Model weight licenses are separate from this tool’s MIT license — check upstream terms before redistribution.
 

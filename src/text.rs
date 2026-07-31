@@ -37,6 +37,32 @@ pub fn normalize_whitespace(text: &str) -> String {
         .join("\n\n")
 }
 
+/// Split chapter text into paragraphs for paragraph-by-paragraph narration.
+pub fn paragraphs_for_tts(text: &str) -> Vec<String> {
+    text.split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Split chapter text into individual sentences.
+///
+/// Paragraph breaks are treated as sentence boundaries as well.
+#[allow(dead_code)]
+pub fn sentences_for_tts(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in paragraphs_for_tts(text) {
+        for sentence in split_sentences(&para) {
+            let s = sentence.trim();
+            if !s.is_empty() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Split long text into chunks suitable for TTS models.
 ///
 /// Prefers paragraph and sentence boundaries so speech cadence stays natural.
@@ -130,7 +156,7 @@ fn split_long_paragraph(para: &str, max_chars: usize) -> Vec<String> {
     out
 }
 
-fn split_sentences(text: &str) -> Vec<String> {
+pub fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut start = 0usize;
     let chars: Vec<char> = text.chars().collect();
@@ -225,5 +251,25 @@ mod tests {
             "oversized chunks: {chunks:?}"
         );
         assert!(chunks.len() >= 2, "expected multiple chunks, got {chunks:?}");
+    }
+
+    #[test]
+    fn paragraphs_split() {
+        let text = "First paragraph here.\n\nSecond paragraph here.\n\nThird.";
+        let p = paragraphs_for_tts(text);
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0], "First paragraph here.");
+        assert_eq!(p[1], "Second paragraph here.");
+        assert_eq!(p[2], "Third.");
+    }
+
+    #[test]
+    fn sentences_split_paragraphs() {
+        let text = "First sentence. Second one!\n\nThird after break?";
+        let s = sentences_for_tts(text);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0], "First sentence.");
+        assert_eq!(s[1], "Second one!");
+        assert_eq!(s[2], "Third after break?");
     }
 }

@@ -30,9 +30,11 @@ impl Backend {
     }
 
     pub fn model_type(self) -> Result<ModelType> {
-        // Compile-time feature gates: non-Kokoro backends need an explicit cargo feature.
         match self {
+            #[cfg(feature = "kokoro")]
             Self::Kokoro => Ok(ModelType::Kokoro),
+            #[cfg(not(feature = "kokoro"))]
+            Self::Kokoro => bail!("backend 'kokoro' requires --features kokoro"),
             #[cfg(feature = "omnivoice")]
             Self::OmniVoice => Ok(ModelType::OmniVoice),
             #[cfg(not(feature = "omnivoice"))]
@@ -55,6 +57,37 @@ impl Backend {
             Self::Voxtral => Ok(ModelType::Voxtral),
             #[cfg(not(feature = "voxtral"))]
             Self::Voxtral => bail!("backend 'voxtral' requires --features voxtral"),
+        }
+    }
+
+    /// Normalize a language tag for this backend (ISO codes → model language names).
+    pub fn normalize_language(self, lang: &str) -> String {
+        let raw = lang.trim();
+        let short = raw
+            .split(['-', '_'])
+            .next()
+            .unwrap_or(raw)
+            .to_ascii_lowercase();
+
+        match self {
+            // Qwen3 CustomVoice expects full language names in many checkpoints.
+            Self::Qwen3Tts => match short.as_str() {
+                "en" | "eng" | "english" => "English".into(),
+                "zh" | "cmn" | "chinese" | "zho" => "Chinese".into(),
+                "ja" | "jpn" | "japanese" => "Japanese".into(),
+                "ko" | "kor" | "korean" => "Korean".into(),
+                "de" | "deu" | "german" => "German".into(),
+                "fr" | "fra" | "fre" | "french" => "French".into(),
+                "ru" | "rus" | "russian" => "Russian".into(),
+                "pt" | "por" | "portuguese" => "Portuguese".into(),
+                "es" | "spa" | "spanish" => "Spanish".into(),
+                "it" | "ita" | "italian" => "Italian".into(),
+                "auto" => "auto".into(),
+                _ if raw.chars().next().is_some_and(|c| c.is_uppercase()) => raw.to_string(),
+                _ => raw.to_string(),
+            },
+            // Kokoro and most others prefer short ISO tags.
+            _ => short,
         }
     }
 }
@@ -143,24 +176,43 @@ impl Engine {
             config = config.with_model_path(path.to_string_lossy());
         }
 
-        tracing::info!(
+        tracing::debug!(
             backend = opts.backend.as_str(),
             model_path = ?opts.model_path,
-            "loading TTS model (first run may download weights from Hugging Face)"
+            "loading TTS model"
         );
 
         let model = load_model(config).context("failed to load any-tts model")?;
         let info = model.model_info();
-        tracing::info!(
+        tracing::debug!(
             name = %info.name,
             sample_rate = info.sample_rate,
+            voices = ?info.voices,
             "model ready"
         );
 
+        let language = opts
+            .language
+            .as_deref()
+            .map(|l| opts.backend.normalize_language(l));
+
+        // Prefer an explicit voice; otherwise pick a sensible CustomVoice default for Qwen3.
+        let voice = opts.voice.clone().or_else(|| {
+            if opts.backend == Backend::Qwen3Tts {
+                default_qwen3_voice(&info.voices, language.as_deref())
+            } else {
+                None
+            }
+        });
+
+        if let Some(v) = &voice {
+            tracing::debug!(voice = %v, language = ?language, "using voice");
+        }
+
         Ok(Self {
             model,
-            language: opts.language.clone(),
-            voice: opts.voice.clone(),
+            language,
+            voice,
             instruct: opts.instruct.clone(),
         })
     }
@@ -182,41 +234,6 @@ impl Engine {
             .with_context(|| format!("synthesis failed for text: {}", truncate(text, 80)))
     }
 
-    /// Synthesize multiple chunks and concatenate into one audio stream.
-    pub fn synthesize_chunks(&self, chunks: &[String]) -> Result<AudioSamples> {
-        if chunks.is_empty() {
-            bail!("no text to synthesize");
-        }
-
-        let mut combined: Option<AudioSamples> = None;
-        let total = chunks.len();
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            tracing::info!(chunk = i + 1, total, chars = chunk.chars().count(), "synthesizing");
-            let audio = self.synthesize_chunk(chunk)?;
-            combined = Some(match combined {
-                None => audio,
-                Some(prev) => concat_audio(prev, audio)?,
-            });
-        }
-
-        combined.context("synthesis produced no audio")
-    }
-}
-
-fn concat_audio(mut a: AudioSamples, b: AudioSamples) -> Result<AudioSamples> {
-    if a.sample_rate != b.sample_rate {
-        bail!(
-            "sample rate mismatch when concatenating audio: {} vs {}",
-            a.sample_rate,
-            b.sample_rate
-        );
-    }
-    // ~250ms pause between chunks
-    let silence_samples = (a.sample_rate as f32 * 0.25) as usize;
-    a.samples.extend(std::iter::repeat_n(0.0f32, silence_samples));
-    a.samples.extend(b.samples);
-    Ok(a)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -227,4 +244,28 @@ fn truncate(s: &str, max: usize) -> String {
         let head: String = s.chars().take(max).collect();
         format!("{head}…")
     }
+}
+
+/// Pick a CustomVoice speaker when the user did not pass --voice.
+fn default_qwen3_voice(voices: &[String], language: Option<&str>) -> Option<String> {
+    if voices.is_empty() {
+        // Common default on the public CustomVoice checkpoint when voice list is empty at load.
+        return Some("Ryan".into());
+    }
+
+    let preferred = match language {
+        Some("English") | None => &["Ryan", "Aiden", "Vivian", "Serena"][..],
+        Some("Chinese") => &["Vivian", "Serena", "Uncle_Fu", "Dylan"][..],
+        Some("Japanese") => &["Ono_Anna", "Sohee"][..],
+        Some("Korean") => &["Sohee", "Ono_Anna"][..],
+        _ => &["Ryan", "Vivian", "Aiden"][..],
+    };
+
+    for name in preferred {
+        if voices.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            return Some((*name).to_string());
+        }
+    }
+
+    voices.first().cloned()
 }
